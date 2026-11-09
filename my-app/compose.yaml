@@ -1,0 +1,38 @@
+services:
+  postgres:
+    image: postgres:17
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      POSTGRES_USER: civic
+      POSTGRES_PASSWORD: local-development-only
+      POSTGRES_DB: civic
+    volumes:
+      - reporting-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U civic"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  storage:
+    # Public, MinIO-compatible Silo image, pinned to a verified amd64/arm64 index.
+    image: docker.io/pgsty/silo:RELEASE.2026-10-26T00-00-00Z@sha256:7bb2aff6b89efe1cb1303c10fc21d579447434ed06649ac9ec05a5e2dbf30ad7
+    command: server /data --console-address :9001
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    environment:
+      MINIO_ROOT_USER: civic-local
+      MINIO_ROOT_PASSWORD: local-development-only
+    volumes:
+      - reporting-storage:/data
+    healthcheck:
+      test: ["CMD", "silo", "healthcheck", "ready"]
+      interval: 3s
+      timeout: 3s
+      start_period: 10s
+      retries: 20
+
+volumes:
+  reporting-postgres:
+  reporting-storage:

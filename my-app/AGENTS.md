@@ -19,7 +19,7 @@ Community / city platform built with **Next.js 16 App Router**, **TypeScript**, 
 | `components/notifications/` | Notification bell |
 | `lib/api/` | Typed fetch client (`api.get / post / put / patch / delete`) |
 | `lib/ai/prompts/` | System prompt builder for CivicBot (injects dietary/allergen profile) |
-| `lib/db/` | DB client stub — swap with Prisma / Drizzle / Supabase |
+| `lib/db/` | PostgreSQL client, transactional reporting store, migrations in migrations/ |
 | `lib/hooks/` | SWR data hooks: `useAuth`, `useIssues`, `useBounties` |
 | `lib/maps/` | Geocoding helpers |
 | `lib/validators/` | Zod schemas for issues, bounties, auth |
@@ -43,7 +43,7 @@ Copy `.env.local.example` → `.env.local` and fill in:
 - `CITY_STAFF_EMAILS` (optional staff access)
 
 Vercel uses `my-app` as its Root Directory and Node.js 22.x. See the root README.
-Data stores are demo-only memory; no database is configured.
+Reports/comments/votes/feed reactions use PostgreSQL (DATABASE_URL); report photos use private S3-compatible storage (REPORTS_S3_*). Run npm run db:migrate before serving reports. See docs/reporting-storage.md for local Docker and production setup. Bounties/profiles/simulated wallets/action history also use PostgreSQL (002_bounties.sql). Bounty photos share the same private bucket under bounties/ prefixes. See docs/bounties-storage.md. Channels remain session-only.
 
 ## Coding conventions
 - All client components start with `"use client"`.

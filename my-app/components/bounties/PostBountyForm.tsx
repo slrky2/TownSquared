@@ -1,14 +1,15 @@
 "use client";
 
 import Image from "next/image";
-import { useEffect, useId, useState, type ChangeEvent, type FormEvent } from "react";
+import { useAuth } from "@clerk/nextjs";
+import { uploadBountyPhoto } from "@/lib/reports/upload";
+import { useEffect, useId, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { APP_CONFIG } from "@/config/app";
 import { distanceKm, type LatLng } from "@/lib/maps";
 import { formatDollars } from "@/lib/utils";
 
 const CITY_NAME = APP_CONFIG.defaultCity.split(",")[0];
 const MAX_PHOTO_INPUT_BYTES = 15 * 1024 * 1024; // before shrinking
-const PHOTO_MAX_SIDE = 1280; // px
 
 export interface PostBountyValues {
   title: string;
@@ -17,37 +18,9 @@ export interface PostBountyValues {
   place: string;
   lat: number | null;
   lng: number | null;
-  /** JPEG data URL, or null for no photo. */
-  image: string | null;
+  /** Owned, validated photo uploaded directly to storage. */
+  photoId: string | null;
   asCity: boolean;
-}
-
-/**
- * Shrink a photo to at most PHOTO_MAX_SIDE px and re-encode it as JPEG.
- * Re-encoding through a canvas also drops EXIF metadata, including any GPS
- * location the camera saved.
- */
-async function shrinkPhoto(file: File): Promise<string> {
-  if (!file.type.startsWith("image/")) throw new Error("Pick an image file.");
-  if (file.size > MAX_PHOTO_INPUT_BYTES) throw new Error("That photo is over 15 MB.");
-
-  let bitmap: ImageBitmap;
-  try {
-    bitmap = await createImageBitmap(file);
-  } catch {
-    throw new Error("Couldn't read that photo. Try a JPEG or PNG.");
-  }
-  const scale = Math.min(1, PHOTO_MAX_SIDE / Math.max(bitmap.width, bitmap.height));
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.round(bitmap.width * scale);
-  canvas.height = Math.round(bitmap.height * scale);
-  const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("Couldn't process that photo.");
-  ctx.fillStyle = "#ffffff"; // transparent PNGs would otherwise turn black
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-  bitmap.close();
-  return canvas.toDataURL("image/jpeg", 0.82);
 }
 
 interface Props {
@@ -67,14 +40,16 @@ type PinState =
 /** Dialog for posting a job, with an optional map pin at the poster's location. */
 export default function PostBountyForm({ wallet, isCityStaff, onClose, onSubmit }: Props) {
   const uid = useId();
+  const { userId } = useAuth();
+  const uploaded = useRef<{ file: File; userId: string; photoId: string; at: number } | null>(null);
   const [title, setTitle] = useState("");
   const [details, setDetails] = useState("");
   const [reward, setReward] = useState("20");
   const [place, setPlace] = useState("");
   const [asCity, setAsCity] = useState(false);
   const [pin, setPin] = useState<PinState>({ status: "none" });
-  const [photo, setPhoto] = useState<string | null>(null);
-  const [photoBusy, setPhotoBusy] = useState(false);
+  const [photo, setPhoto] = useState<{ file: File; previewUrl: string } | null>(null);
+  useEffect(() => () => { if (photo) URL.revokeObjectURL(photo.previewUrl); }, [photo]);
   const [photoError, setPhotoError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -106,29 +81,34 @@ export default function PostBountyForm({ wallet, isCityStaff, onClose, onSubmit 
     );
   }
 
-  async function pickPhoto(e: ChangeEvent<HTMLInputElement>) {
-    const input = e.currentTarget;
-    const file = input.files?.[0];
+  function pickPhoto(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.currentTarget.files?.[0];
     if (!file) return;
-    setPhotoBusy(true);
     setPhotoError(null);
-    try {
-      setPhoto(await shrinkPhoto(file));
-    } catch (err) {
+    uploaded.current = null;
+    if (!file.type.startsWith("image/") || file.size > MAX_PHOTO_INPUT_BYTES) {
       setPhoto(null);
-      setPhotoError(err instanceof Error ? err.message : "Couldn't use that photo.");
-    } finally {
-      setPhotoBusy(false);
-      input.value = ""; // lets the same file be picked again after removing it
+      setPhotoError("Choose an image under 15 MB.");
+    } else {
+      setPhoto({ file, previewUrl: URL.createObjectURL(file) });
     }
+    e.currentTarget.value = "";
   }
 
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    if (submitting || photoBusy) return;
+    if (submitting) return;
     setSubmitting(true);
     setError(null);
     try {
+      if (!userId) throw new Error("Sign in to post a job.");
+      let photoId: string | null = null;
+      if (photo) {
+        if (!uploaded.current || uploaded.current.file !== photo.file || uploaded.current.userId !== userId || Date.now() - uploaded.current.at > 50 * 60_000) {
+          uploaded.current = { file: photo.file, userId, photoId: await uploadBountyPhoto(photo.file), at: Date.now() };
+        }
+        photoId = uploaded.current.photoId;
+      }
       const coords = pin.status === "pinned" ? pin.coords : null;
       await onSubmit({
         title,
@@ -137,7 +117,7 @@ export default function PostBountyForm({ wallet, isCityStaff, onClose, onSubmit 
         place,
         lat: coords?.lat ?? null,
         lng: coords?.lng ?? null,
-        image: photo,
+        photoId,
         asCity,
       });
     } catch (err) {
@@ -212,7 +192,7 @@ export default function PostBountyForm({ wallet, isCityStaff, onClose, onSubmit 
                 id={`${uid}-r`}
                 type="number"
                 required
-                min={1}
+                min={0.01}
                 max={1000}
                 step="0.01"
                 value={reward}
@@ -247,7 +227,7 @@ export default function PostBountyForm({ wallet, isCityStaff, onClose, onSubmit 
             {photo ? (
               <div className="mt-1 space-y-1">
                 <div className="relative aspect-[16/9] w-full overflow-hidden rounded-lg bg-zinc-100 dark:bg-zinc-800">
-                  <Image src={photo} alt="Preview of your job photo" fill unoptimized className="object-cover" />
+                  <Image src={photo.previewUrl} alt="Preview of your job photo" fill unoptimized className="object-cover" />
                 </div>
                 <button
                   type="button"
@@ -263,13 +243,13 @@ export default function PostBountyForm({ wallet, isCityStaff, onClose, onSubmit 
                 type="file"
                 accept="image/*"
                 onChange={pickPhoto}
-                disabled={photoBusy}
+                disabled={submitting}
                 aria-describedby={`${uid}-img-hint`}
                 className="mt-1 block w-full text-sm text-zinc-600 file:mr-3 file:rounded-lg file:border-0 file:bg-emerald-50 file:px-3 file:py-1.5 file:text-sm file:font-semibold file:text-emerald-700 hover:file:bg-emerald-100 dark:text-zinc-300 dark:file:bg-emerald-500/15 dark:file:text-emerald-300"
               />
             )}
             <p id={`${uid}-img-hint`} className="mt-1 text-xs text-zinc-500">
-              {photoBusy ? "Preparing photo…" : "Show the yard, the couch, the job. Location data is removed."}
+              {submitting ? "Uploading photo…" : "Show the yard, the couch, the job. Location data is removed."}
             </p>
             {photoError && (
               <p role="alert" className="mt-1 text-xs text-red-600">
@@ -324,7 +304,7 @@ export default function PostBountyForm({ wallet, isCityStaff, onClose, onSubmit 
 
           <button
             type="submit"
-            disabled={submitting || photoBusy}
+            disabled={submitting}
             className="w-full rounded-lg bg-emerald-600 py-2.5 font-semibold text-white transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {submitting ? "Posting…" : "Post job"}

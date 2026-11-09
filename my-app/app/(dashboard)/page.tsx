@@ -14,8 +14,8 @@ import { coordsOf, useUserLocation } from "@/lib/hooks/useUserLocation";
 import { severityBadgeClass } from "@/lib/utils/severity";
 
 export default function Home() {
-  const { reports, isLive } = useIssues();
-  const { posts, isLive: postsLive, toggleReaction } = usePosts();
+  const { reports, isLive, error: reportsError } = useIssues();
+  const { posts, isLive: postsLive, toggleReaction, error: postsError } = usePosts();
   const { bounties } = useBounties();
   // Center the map on the user (blue dot + accuracy circle) once the browser
   // shares their location; otherwise it stays on the city center.
@@ -37,13 +37,14 @@ export default function Home() {
         aria-label="Community feed"
         className="min-w-0 overflow-y-auto border-black/5 px-4 py-6 sm:px-6 lg:border-r dark:border-white/10"
       >
+        {(reportsError || postsError) && <p role="alert" className="mb-3 text-sm text-red-600">Could not load community activity. Please try again.</p>}
+        {!postsLive && !postsError && <p role="status" className="mb-3 text-sm text-zinc-500">Loading activity…</p>}
         <CommunityFeed
           posts={posts}
           selectedId={selectedId}
           showTimes={postsLive}
           onSelect={setSelectedId}
-          // Failed reactions roll back automatically; nothing else to show.
-          onToggleReaction={(postId) => void toggleReaction(postId).catch(() => {})}
+          onToggleReaction={toggleReaction}
         />
       </section>
 

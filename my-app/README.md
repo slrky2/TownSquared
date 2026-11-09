@@ -36,8 +36,8 @@ Copy `.env.local.example` to `.env.local` and fill in:
 | `ANTHROPIC_API_KEY` | Enables the Claude city assistant |
 | `CITY_STAFF_EMAILS` | Optional comma-separated verified staff emails |
 
-Database and NextAuth variables are not used by the current app.
-See [Vercel deployment instructions](../README.md#deploy-to-vercel) for hosting setup and demo storage limitations.
+Reports, bounties, profiles, and simulated wallets require `DATABASE_URL` (PostgreSQL). Photos require the server-only `REPORTS_S3_*` variables from the environment template. Follow [persistent reporting setup](docs/reporting-storage.md) for local services, migrations, and production configuration. NextAuth variables are not used.
+See [Vercel deployment instructions](../README.md#deploy-to-vercel) for hosting setup and remaining demo-feature limitations.
 
 ---
 
@@ -83,14 +83,14 @@ my-app/
 │       ├── auth/                 # Login / register / session
 │       ├── users/                # User CRUD + profile updates
 │       ├── channels/             # Channel management
-│       ├── issues/               # GET reports (per-viewer vote state), POST new report
+│       ├── issues/               # GET reports (session vote state), authenticated POST report
 │       │   └── [issueId]/
 │       │       ├── upvote/       # POST — toggle the viewer's upvote
 │       │       └── comments/     # POST — add a comment
 │       ├── bounties/             # Bounty creation + claiming
 │       ├── chatbot/              # Claude messages proxy
 │       ├── map/                  # Map pin queries (supports bounding box)
-│       ├── posts/                # GET feed posts (per-viewer reaction state)
+│       ├── posts/                # GET report feed posts (session reaction state)
 │       │   └── [postId]/react/   # POST — toggle "Thanks" / "Going"
 │       └── notifications/        # User notifications
 │
@@ -140,9 +140,9 @@ my-app/
 │   │   └── prompts/
 │   │       └── chatbot.ts        # Builds the Claude system prompt with city + dietary context
 │   ├── db/
-│   │   ├── index.ts              # DB client stub (swap with Prisma / Drizzle / Supabase)
+│   │   ├── index.ts              # PostgreSQL client and reporting persistence
 │   │   ├── seed.ts               # Mock Lowell, MA reports + posts, marker builder
-│   │   └── store.ts              # In-memory server store: reports, upvotes, comments
+│   │   └── store.ts              # Transactional SQL store: reports, upvotes, comments and feed
 │   ├── hooks/
 │   │   ├── useAuth.ts            # SWR hook for current session
 │   │   ├── useIssues.ts          # SWR reports + optimistic upvote, addComment

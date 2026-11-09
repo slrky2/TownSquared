@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { useAuth, useClerk } from "@clerk/nextjs";
 import RelativeTime from "@/components/ui/RelativeTime";
 import { severityBadgeClass } from "@/lib/utils/severity";
 import type { CityReport } from "@/types";
@@ -10,7 +11,7 @@ interface ReportCardProps {
   isSelected: boolean;
   /** Toggle selection (focuses the pin and expands comments). */
   onSelect: () => void;
-  onToggleUpvote: () => void;
+  onToggleUpvote: () => Promise<void>;
   /** Should throw on failure so the card can show an error. */
   onAddComment: (text: string) => Promise<void>;
 }
@@ -23,6 +24,9 @@ export default function ReportCard({
   onToggleUpvote,
   onAddComment,
 }: ReportCardProps) {
+  const { isSignedIn } = useAuth();
+  const { openSignIn } = useClerk();
+  const [voting, setVoting] = useState(false);
   const cardRef = useRef<HTMLElement>(null);
   const [draft, setDraft] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -38,6 +42,7 @@ export default function ReportCard({
 
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    if (!isSignedIn) { void openSignIn(); return; }
     const text = draft.trim();
     if (!text || submitting) return;
     setSubmitting(true);
@@ -67,7 +72,15 @@ export default function ReportCard({
         {/* Upvote: raises the community priority of this report */}
         <button
           type="button"
-          onClick={onToggleUpvote}
+          disabled={voting}
+          onClick={async () => {
+            if (!isSignedIn) { void openSignIn(); return; }
+            setVoting(true);
+            setError(null);
+            try { await onToggleUpvote(); }
+            catch (err) { setError(err instanceof Error ? err.message : "Could not vote. Try again."); }
+            finally { setVoting(false); }
+          }}
           aria-pressed={report.hasUpvoted}
           aria-label={`Upvote "${report.title}", ${report.upvotes} upvotes`}
           className={`flex w-12 shrink-0 flex-col items-center rounded-xl border py-1.5 text-sm font-bold transition-colors ${
@@ -107,7 +120,7 @@ export default function ReportCard({
               </p>
             </div>
             {report.photoUrls[0] && (
-              // eslint-disable-next-line @next/next/no-img-element -- served from our in-memory API
+              // eslint-disable-next-line @next/next/no-img-element -- served from our report photo API
               <img
                 src={report.photoUrls[0]}
                 alt={`Photo of: ${report.title}`}
@@ -176,13 +189,9 @@ export default function ReportCard({
               {submitting ? "Posting…" : "Post"}
             </button>
           </form>
-          {error && (
-            <p role="alert" className="mt-1.5 text-xs text-red-600">
-              {error}
-            </p>
-          )}
         </div>
       )}
+      {error && <p role="alert" className="mt-2 text-xs text-red-600">{error}</p>}
     </article>
   );
 }

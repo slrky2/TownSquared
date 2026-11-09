@@ -1,20 +1,21 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { getPhoto } from "@/lib/db/store";
+import { getPhotoKey } from "@/lib/db/store";
+import { photoStorage } from "@/lib/reports/storage";
+import { reportingResponse, RequestError } from "@/lib/api/errors";
 
-// GET /api/issues/photos/:photoId — a report photo (JPEG)
-export async function GET(_req: Request, ctx: RouteContext<"/api/issues/photos/[photoId]">) {
-  const { photoId } = await ctx.params;
-  const bytes = z.uuid().safeParse(photoId).success ? getPhoto(photoId) : null;
-  if (!bytes) {
-    return NextResponse.json({ message: "Photo not found" }, { status: 404 });
-  }
-  return new NextResponse(new Uint8Array(bytes), {
-    headers: {
+// Only validated photos attached to public reports can be read here.
+export function GET(_req: Request, ctx: RouteContext<"/api/issues/photos/[photoId]">) {
+  return reportingResponse(async () => {
+    const { photoId } = await ctx.params;
+    if (!z.uuid().safeParse(photoId).success) throw new RequestError(404, "Photo not found");
+    const key = await getPhotoKey(photoId);
+    if (!key) throw new RequestError(404, "Photo not found");
+    const bytes = await photoStorage.read(key);
+    return new NextResponse(new Uint8Array(bytes), { headers: {
       "Content-Type": "image/jpeg",
-      // Photo ids are random and never reused, so the bytes never change.
       "Cache-Control": "public, max-age=31536000, immutable",
       "X-Content-Type-Options": "nosniff",
-    },
+    } });
   });
 }

@@ -1,26 +1,16 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { addComment } from "@/lib/db/store";
 import { commentSchema } from "@/lib/validators/issue";
+import { readJson, reportingResponse, RequestError } from "@/lib/api/errors";
+import { requireReportUser } from "@/lib/reports/auth";
 
-// POST /api/issues/:issueId/comments  { viewerId, text } — adds a comment
-export async function POST(req: NextRequest, ctx: RouteContext<"/api/issues/[issueId]/comments">) {
-  const { issueId } = await ctx.params;
-  const id = Number(issueId);
-  const parsed = commentSchema.safeParse(await req.json().catch(() => null));
-
-  if (!parsed.success) {
-    const message = parsed.error.issues[0]?.message ?? "Invalid request";
-    return NextResponse.json({ message }, { status: 400 });
-  }
-  if (!Number.isInteger(id)) {
-    return NextResponse.json({ message: "Invalid report id" }, { status: 400 });
-  }
-
-  const result = addComment(id, parsed.data.viewerId, parsed.data.text);
-  if (!result.ok) {
-    return result.reason === "not_found"
-      ? NextResponse.json({ message: "Report not found" }, { status: 404 })
-      : NextResponse.json({ message: "This report has reached its comment limit" }, { status: 409 });
-  }
-  return NextResponse.json({ report: result.report }, { status: 201 });
+export function POST(req: Request, ctx: RouteContext<"/api/issues/[issueId]/comments">) {
+  return reportingResponse(async () => {
+    const userId = await requireReportUser();
+    const id = Number((await ctx.params).issueId);
+    if (!Number.isSafeInteger(id) || id <= 0 || id > 2147483647) throw new RequestError(400, "Invalid report id");
+    const parsed = commentSchema.safeParse(await readJson(req));
+    if (!parsed.success) throw new RequestError(400, parsed.error.issues[0]?.message ?? "Invalid comment");
+    return NextResponse.json({ report: await addComment(id, userId, parsed.data.text) }, { status: 201 });
+  });
 }
