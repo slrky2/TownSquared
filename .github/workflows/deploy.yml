@@ -4,24 +4,30 @@ on:
   push:
     branches: ["main"]
   pull_request:
+  merge_group:
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: validate-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
     defaults:
       run:
         working-directory: ./my-app
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -34,7 +40,26 @@ jobs:
         run: npm run lint
       - name: Type check
         run: npm run typecheck
-      - name: Run tests
-        run: npm test
+      - name: Start disposable integration services
+        run: docker compose up -d --wait --wait-timeout 120
+      - name: Run unit and integration tests
+        env:
+          BOUNTY_TEST_DATABASE_URL: postgresql://civic:local-development-only@localhost:5432/civic
+          BOUNTY_TEST_STORAGE: "1"
+          REPORTS_S3_ENDPOINT: http://localhost:9000
+          REPORTS_S3_REGION: us-east-1
+          REPORTS_S3_BUCKET: civic-reports-ci
+          REPORTS_S3_FORCE_PATH_STYLE: "true"
+          REPORTS_S3_ACCESS_KEY_ID: civic-local
+          REPORTS_S3_SECRET_ACCESS_KEY: local-development-only
+        run: |
+          npm run storage:setup:local
+          npm test
       - name: Build Next.js
         run: npm run build
+      - name: Show integration service logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail=100
+      - name: Remove disposable integration services
+        if: always()
+        run: docker compose down --volumes
