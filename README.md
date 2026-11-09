@@ -38,6 +38,9 @@ npm run dev
 ```
 
 Use Node.js 22.x. Run `npm test`, `npm run typecheck`, `npm run lint`, and `npm run build` before opening a pull request.
+GitHub Actions runs these checks on pull requests, pushes to `main`, and merge queues. CI starts disposable PostgreSQL and object-storage services so the real concurrency and photo-upload tests also run; it does not require production secrets. Configure the `validate` status check as required in GitHub branch protection or a ruleset to block failing merges.
+
+Dependabot checks npm dependencies in `my-app/` and GitHub Actions every Monday. Minor and patch npm updates share a PR; major npm upgrades are proposed separately. Updates require review and CI, and are not automatically merged. The configuration takes effect once `.github/dependabot.yml` reaches the default branch.
 The chatbot's `data/Lowell.md` is explicitly bundled with its Node.js function.
 
 See [the app guide](my-app/README.md) for the source layout.
