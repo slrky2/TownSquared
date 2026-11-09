@@ -1,12 +1,13 @@
 // Individual channel view — message thread + member list
 interface Props {
-  params: { channelId: string };
+  params: Promise<{ channelId: string }>;
 }
 
-export default function ChannelPage({ params }: Props) {
+export default async function ChannelPage({ params }: Props) {
+  const { channelId } = await params;
   return (
     <div>
-      <h1 className="text-2xl font-semibold mb-4">Channel: {params.channelId}</h1>
+      <h1 className="text-2xl font-semibold mb-4">Channel: {channelId}</h1>
       {/* TODO: render MessageThread and MessageInput */}
     </div>
   );

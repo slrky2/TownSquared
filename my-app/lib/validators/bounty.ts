@@ -1,18 +1,18 @@
 import { z } from "zod";
-import { MAX_IMAGE_DATA_URL_LENGTH } from "@/lib/bounties/image";
 
 /**
  * Body for POST /api/bounties. Who is posting comes from the Clerk session,
  * never from the body.
  */
 export const createBountySchema = z
-  .object({
+  .strictObject({
     title: z.string().trim().min(1, "Give the job a title.").max(120, "Keep the title under 120 characters."),
     details: z.string().trim().max(2000, "Keep the details under 2,000 characters.").default(""),
     reward: z
       .number({ error: "Reward must be a number." })
       .gt(0, "The reward must be more than $0.")
-      .max(1000, "The reward can be at most $1,000."),
+      .max(1000, "The reward can be at most $1,000.")
+      .refine((n) => Math.abs(n * 100 - Math.round(n * 100)) < 1e-8, "Use whole cents for the reward."),
     place: z
       .string({ error: "Say where the job is, like a street or neighborhood." })
       .trim()
@@ -20,8 +20,8 @@ export const createBountySchema = z
       .max(120, "Keep the place under 120 characters."),
     lat: z.number().min(-90).max(90).nullable().default(null),
     lng: z.number().min(-180).max(180).nullable().default(null),
-    /** Optional photo as a base64 data URL; decoded and checked in lib/bounties/image.ts. */
-    image: z.string().max(MAX_IMAGE_DATA_URL_LENGTH, "That photo is too large (2 MB max).").nullable().default(null),
+    /** Ready photo uploaded directly to storage by the signed-in account. */
+    photoId: z.uuid().nullable().default(null),
     /** Post as the city (city staff only). */
     asCity: z.boolean().default(false),
   })

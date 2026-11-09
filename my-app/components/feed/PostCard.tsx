@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useAuth, useClerk } from "@clerk/nextjs";
 import Image from "next/image";
 import RelativeTime from "@/components/ui/RelativeTime";
 import type { CityPost, PostKind } from "@/types";
@@ -21,11 +22,15 @@ interface PostCardProps {
   /** Hide timestamps until real data has loaded. */
   showTime: boolean;
   onShowOnMap: () => void;
-  onToggleReaction: () => void;
+  onToggleReaction: () => Promise<void>;
 }
 
 /** One feed post: who posted, what kind of update it is, and a way to help or show up. */
 export default function PostCard({ post, isSelected, showTime, onShowOnMap, onToggleReaction }: PostCardProps) {
+  const { isSignedIn } = useAuth();
+  const { openSignIn } = useClerk();
+  const [reacting, setReacting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const cardRef = useRef<HTMLElement>(null);
   const kind = KIND_STYLES[post.kind];
   const isOfficial = post.author.type === "city";
@@ -105,7 +110,15 @@ export default function PostCard({ post, isSelected, showTime, onShowOnMap, onTo
       <footer className="flex items-center justify-between gap-2 border-t border-black/5 px-4 py-2 dark:border-white/10">
         <button
           type="button"
-          onClick={onToggleReaction}
+          disabled={reacting}
+          onClick={async () => {
+            if (!isSignedIn) { void openSignIn(); return; }
+            setReacting(true);
+            setError(null);
+            try { await onToggleReaction(); }
+            catch (err) { setError(err instanceof Error ? err.message : "Could not react. Try again."); }
+            finally { setReacting(false); }
+          }}
           aria-pressed={post.hasReacted}
           aria-label={`${reactionLabel}, ${post.reactions} ${post.when ? "going" : "neighbors said thanks"}`}
           className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold transition-colors ${
@@ -132,6 +145,7 @@ export default function PostCard({ post, isSelected, showTime, onShowOnMap, onTo
           <span className="text-xs text-zinc-500">📍 {post.location}</span>
         )}
       </footer>
+      {error && <p role="alert" className="px-4 pb-3 text-xs text-red-600">{error}</p>}
     </article>
   );
 }

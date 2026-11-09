@@ -1,10 +1,11 @@
-import { NextRequest, NextResponse } from "next/server";
+import { auth } from "@clerk/nextjs/server";
+import { NextResponse } from "next/server";
 import { listPosts } from "@/lib/db/store";
-import { viewerIdSchema } from "@/lib/validators/issue";
+import { reportingResponse } from "@/lib/api/errors";
 
-// GET /api/posts?viewerId=<uuid> — feed posts, newest first, with that viewer's reaction state
-export async function GET(req: NextRequest) {
-  const parsed = viewerIdSchema.safeParse(req.nextUrl.searchParams.get("viewerId"));
-  const viewerId = parsed.success ? parsed.data : null;
-  return NextResponse.json({ posts: listPosts(viewerId) });
+export function GET() {
+  return reportingResponse(async () => {
+    const { userId } = await auth();
+    return NextResponse.json({ posts: await listPosts(userId) }, { headers: { "Cache-Control": "private, no-store" } });
+  });
 }

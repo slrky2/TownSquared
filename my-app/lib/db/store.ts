@@ -1,293 +1,146 @@
 import { randomUUID } from "node:crypto";
-import type { CityPost, CityReport, CityTicket, TicketSeverity } from "@/types";
-import type { ReportCategory } from "@/lib/utils/report";
-import { SEED_ISSUES, seedPosts, seedReporterName } from "./seed";
+import db, { type Database, type SqlClient } from "./index";
+import { RequestError } from "@/lib/api/errors";
+import type { NewReport } from "@/lib/validators/issue";
+import type { CityPost, CityReport } from "@/types";
 
-/**
- * Server-side in-memory store for reports, photos, posts, upvotes, and comments.
- * Starts with the seed reports and posts; reports filed on the Report page are
- * added on top (and each one also gets a feed post).
- *
- * POC only: data resets when the server restarts and isn't shared across
- * serverless instances. Replace with real DB calls behind the same functions.
- */
+const photoUrl = (id: string) => `/api/issues/photos/${id}`;
+const iso = (date: Date | string) => new Date(date).toISOString();
 
-const MAX_REPORTS = 500;
-const MAX_COMMENTS_PER_ISSUE = 200;
-// Caps total photo memory so the demo server can't be filled up.
-const MAX_TOTAL_PHOTO_BYTES = 200 * 1024 * 1024;
+type ReportRow = {
+  id: number; title: string; description: string; category: CityReport["category"];
+  severity: CityReport["severity"]; lat: number; lng: number; location: string;
+  author_id: string; author_name: string; created_at: Date | string;
+  photo_ids: string[]; upvotes: number; has_upvoted: boolean;
+  reactions: number; has_reacted: boolean;
+  comments: Array<{ id: string; author_id: string; author_name: string; text: string; created_at: string }>;
+};
 
-interface StoredComment {
-  id: string;
-  authorId: string | null; // null for seed comments
-  authorName: string;
-  text: string;
-  createdAt: string;
-}
+// Aggregate each relation separately so votes/comments/photos cannot multiply counts.
+const REPORT_SELECT = `SELECT r.*, 'neighbor_' || u.public_number AS author_name,
+  ARRAY(SELECT p.id::text FROM report_photos p WHERE p.report_id = r.id ORDER BY p.position) AS photo_ids,
+  (SELECT count(*)::integer FROM report_votes v WHERE v.report_id = r.id) AS upvotes,
+  EXISTS(SELECT 1 FROM report_votes v WHERE v.report_id = r.id AND v.user_id = $1) AS has_upvoted,
+  (SELECT count(*)::integer FROM report_reactions v WHERE v.report_id = r.id) AS reactions,
+  EXISTS(SELECT 1 FROM report_reactions v WHERE v.report_id = r.id AND v.user_id = $1) AS has_reacted,
+  COALESCE((SELECT json_agg(c ORDER BY c.created_at, c.id) FROM (
+    SELECT c.id, c.author_id, c.text, c.created_at, 'neighbor_' || cu.public_number AS author_name
+    FROM report_comments c JOIN report_users cu ON cu.id = c.author_id WHERE c.report_id = r.id
+  ) c), '[]'::json) AS comments
+  FROM reports r JOIN report_users u ON u.id = r.author_id`;
 
-interface StoredIssue {
-  ticket: CityTicket;
-  description: string;
-  authorId: string | null; // null for seed reports
-  authorName: string;
-  reportedAt: string;
-  photoIds: string[];
-  baseUpvotes: number; // seed votes, not tied to a viewer
-  upvoterIds: Set<string>;
-  comments: StoredComment[];
-}
-
-interface StoredPost {
-  post: Omit<CityPost, "reactions" | "hasReacted" | "isMine">; // recomputed per viewer
-  authorId: string | null; // null for seed posts
-  baseReactions: number; // seed reactions, not tied to a viewer
-  reactorIds: Set<string>;
-}
-
-// Bump when the Store shape changes so a running dev server rebuilds it.
-const STORE_VERSION = 3;
-
-interface Store {
-  version: number;
-  issues: Map<number, StoredIssue>;
-  posts: Map<number, StoredPost>;
-  photos: Map<string, Buffer>;
-  photoBytes: number;
-  displayNames: Map<string, string>;
-  nextIssueId: number;
-  nextPostId: number;
-}
-
-// Kept on globalThis so dev hot-reloads don't wipe the data.
-const globalForStore = globalThis as typeof globalThis & { __cityLandStore?: Store };
-
-function getStore(): Store {
-  if (globalForStore.__cityLandStore?.version !== STORE_VERSION) {
-    globalForStore.__cityLandStore = createStore();
-  }
-  return globalForStore.__cityLandStore;
-}
-
-function createStore(): Store {
-  const issues = new Map<number, StoredIssue>();
-  for (const seed of SEED_ISSUES) {
-    issues.set(seed.ticket.id, {
-      ticket: seed.ticket,
-      description: seed.ticket.title,
-      authorId: null,
-      authorName: seedReporterName(seed.ticket.id),
-      reportedAt: seed.reportedAt,
-      photoIds: [],
-      baseUpvotes: seed.upvotes,
-      upvoterIds: new Set(),
-      comments: seed.comments.map((c) => ({ ...c, authorId: null })),
-    });
-  }
-
-  // Post times are relative to server start so the feed always looks fresh.
-  const posts = new Map<number, StoredPost>();
-  for (const { reactions, hasReacted: _unused, ...post } of seedPosts(Date.now())) {
-    void _unused;
-    posts.set(post.id, { post, authorId: null, baseReactions: reactions, reactorIds: new Set() });
-  }
-
-  const maxId = (ids: Iterable<number>) => Math.max(0, ...ids);
+function toReport(row: ReportRow, userId: string | null): CityReport {
   return {
-    version: STORE_VERSION,
-    issues,
-    posts,
-    photos: new Map(),
-    photoBytes: 0,
-    displayNames: new Map(),
-    nextIssueId: maxId(issues.keys()) + 1,
-    nextPostId: maxId(posts.keys()) + 1,
-  };
-}
-
-/** Stable anonymous display name per viewer, e.g. "neighbor_101". */
-function displayNameFor(store: Store, viewerId: string): string {
-  let name = store.displayNames.get(viewerId);
-  if (!name) {
-    name = `neighbor_${101 + store.displayNames.size}`;
-    store.displayNames.set(viewerId, name);
-  }
-  return name;
-}
-
-const photoUrl = (photoId: string) => `/api/issues/photos/${photoId}`;
-
-/** Shape a stored issue for a specific viewer. Never exposes other viewers' ids. */
-function toReport(issue: StoredIssue, viewerId: string | null): CityReport {
-  return {
-    ...issue.ticket,
-    description: issue.description,
-    photoUrls: issue.photoIds.map(photoUrl),
-    authorName: issue.authorName,
-    isMine: viewerId !== null && issue.authorId === viewerId,
-    reportedAt: issue.reportedAt,
-    upvotes: issue.baseUpvotes + issue.upvoterIds.size,
-    hasUpvoted: viewerId !== null && issue.upvoterIds.has(viewerId),
-    comments: issue.comments.map((c) => ({
-      id: c.id,
-      authorName: c.authorName,
-      text: c.text,
-      createdAt: c.createdAt,
-      isMine: viewerId !== null && c.authorId === viewerId,
+    id: row.id, title: row.title, description: row.description,
+    category: row.category, severity: row.severity, lat: row.lat, lng: row.lng,
+    location: row.location, photoUrls: row.photo_ids.map(photoUrl),
+    authorName: row.author_name, isMine: row.author_id === userId,
+    reportedAt: iso(row.created_at), upvotes: row.upvotes, hasUpvoted: row.has_upvoted,
+    comments: row.comments.map((c) => ({
+      id: c.id, authorName: c.author_name, text: c.text,
+      createdAt: iso(c.created_at), isMine: c.author_id === userId,
     })),
   };
 }
 
-/** All reports, newest first, so new reports land on top of the seed ones. */
-export function listReports(viewerId: string | null): CityReport[] {
-  return [...getStore().issues.values()]
-    .map((issue) => toReport(issue, viewerId))
-    .sort((a, b) => b.reportedAt.localeCompare(a.reportedAt) || b.id - a.id);
+function toPost(row: ReportRow, userId: string | null): CityPost {
+  return {
+    id: row.id, issueId: row.id, kind: "report", title: row.title, caption: row.description,
+    author: { name: row.author_name, type: "resident", subtitle: `Reported a ${row.category.toLowerCase()} problem` },
+    location: row.location, coords: { lat: row.lat, lng: row.lng },
+    photoUrls: row.photo_ids.map(photoUrl), postedAt: iso(row.created_at),
+    reactions: row.reactions, hasReacted: row.has_reacted, isMine: row.author_id === userId,
+  };
 }
 
-export interface NewReport {
-  description: string;
-  category: ReportCategory;
-  severity: TicketSeverity;
-  lat: number;
-  lng: number;
-  locationDetails?: string;
-  /** Decoded JPEG bytes. */
-  photos: Buffer[];
+export async function ensureReportUser(client: SqlClient, userId: string) {
+  await client.query("INSERT INTO report_users (id) VALUES ($1) ON CONFLICT (id) DO NOTHING", [userId]);
 }
 
-export type CreateReportResult =
-  | { ok: true; report: CityReport; post: CityPost }
-  | { ok: false; reason: "limit_reached" | "storage_full" };
-
-/** Short headline from the description: first sentence, at most 80 characters. */
-function titleFrom(description: string): string {
-  const firstSentence = description.split(/(?<=[.!?])\s|\n/)[0].trim();
-  return firstSentence.length <= 80 ? firstSentence : `${firstSentence.slice(0, 79).trimEnd()}…`;
-}
-
-/** Add a report, plus a feed post about it. */
-export function createReport(input: NewReport, viewerId: string): CreateReportResult {
-  const store = getStore();
-  if (store.issues.size >= MAX_REPORTS) return { ok: false, reason: "limit_reached" };
-
-  const incomingBytes = input.photos.reduce((sum, p) => sum + p.length, 0);
-  if (store.photoBytes + incomingBytes > MAX_TOTAL_PHOTO_BYTES) {
-    return { ok: false, reason: "storage_full" };
+/** Dependency injection lets the same SQL run against PostgreSQL in production and tests. */
+export function reportingStore(database: Database) {
+  async function row(client: SqlClient, id: number, userId: string | null) {
+    const result = await client.query<ReportRow>(`${REPORT_SELECT} WHERE r.id = $2`, [userId, id]);
+    if (!result.rows[0]) throw new RequestError(404, "Report not found.");
+    return result.rows[0];
   }
 
-  const photoIds = input.photos.map((bytes) => {
-    const id = randomUUID();
-    store.photos.set(id, bytes);
-    return id;
-  });
-  store.photoBytes += incomingBytes;
+  async function lockReport(client: SqlClient, id: number) {
+    const result = await client.query("SELECT id FROM reports WHERE id = $1 FOR UPDATE", [id]);
+    if (!result.rows.length) throw new RequestError(404, "Report not found.");
+  }
 
-  const now = new Date().toISOString();
-  const authorName = displayNameFor(store, viewerId);
-  const location = input.locationDetails || `${input.lat.toFixed(4)}, ${input.lng.toFixed(4)}`;
-
-  const issueId = store.nextIssueId++;
-  const issue: StoredIssue = {
-    ticket: {
-      id: issueId,
-      title: titleFrom(input.description),
-      category: input.category,
-      severity: input.severity,
-      location,
-      lat: input.lat,
-      lng: input.lng,
-    },
-    description: input.description,
-    authorId: viewerId,
-    authorName,
-    reportedAt: now,
-    photoIds,
-    baseUpvotes: 0,
-    upvoterIds: new Set(),
-    comments: [],
-  };
-  store.issues.set(issueId, issue);
-
-  const postId = store.nextPostId++;
-  const post: StoredPost = {
-    post: {
-      id: postId,
-      author: { name: authorName, type: "resident", subtitle: `Reported a ${input.category.toLowerCase()} problem` },
-      kind: "report",
-      title: issue.ticket.title,
-      caption: input.description,
-      location,
-      coords: { lat: input.lat, lng: input.lng },
-      postedAt: now,
-      issueId,
-      photoUrls: photoIds.map(photoUrl),
-    },
-    authorId: viewerId,
-    baseReactions: 0,
-    reactorIds: new Set(),
-  };
-  store.posts.set(postId, post);
-
-  return { ok: true, report: toReport(issue, viewerId), post: toPost(post, viewerId) };
-}
-
-/** JPEG bytes for a report photo, or null if it doesn't exist. */
-export function getPhoto(photoId: string): Buffer | null {
-  return getStore().photos.get(photoId) ?? null;
-}
-
-/** Toggle the viewer's upvote. Returns null if the issue doesn't exist. */
-export function toggleUpvote(issueId: number, viewerId: string): CityReport | null {
-  const issue = getStore().issues.get(issueId);
-  if (!issue) return null;
-  if (issue.upvoterIds.has(viewerId)) issue.upvoterIds.delete(viewerId);
-  else issue.upvoterIds.add(viewerId);
-  return toReport(issue, viewerId);
-}
-
-export type AddCommentResult =
-  | { ok: true; report: CityReport }
-  | { ok: false; reason: "not_found" | "limit_reached" };
-
-export function addComment(issueId: number, viewerId: string, text: string): AddCommentResult {
-  const store = getStore();
-  const issue = store.issues.get(issueId);
-  if (!issue) return { ok: false, reason: "not_found" };
-  if (issue.comments.length >= MAX_COMMENTS_PER_ISSUE) return { ok: false, reason: "limit_reached" };
-
-  issue.comments.push({
-    id: randomUUID(),
-    authorId: viewerId,
-    authorName: displayNameFor(store, viewerId),
-    text,
-    createdAt: new Date().toISOString(),
-  });
-  return { ok: true, report: toReport(issue, viewerId) };
-}
-
-// ─── Posts ────────────────────────────────────────────────────────────────────
-
-function toPost(stored: StoredPost, viewerId: string | null): CityPost {
   return {
-    ...stored.post,
-    reactions: stored.baseReactions + stored.reactorIds.size,
-    hasReacted: viewerId !== null && stored.reactorIds.has(viewerId),
-    isMine: viewerId !== null && stored.authorId === viewerId,
+    async listReports(userId: string | null) {
+      const result = await database.query<ReportRow>(`${REPORT_SELECT} ORDER BY r.created_at DESC, r.id DESC`, [userId]);
+      return result.rows.map((r) => toReport(r, userId));
+    },
+    async listPosts(userId: string | null) {
+      const result = await database.query<ReportRow>(`${REPORT_SELECT} ORDER BY r.created_at DESC, r.id DESC`, [userId]);
+      return result.rows.map((r) => toPost(r, userId));
+    },
+    async createReport(input: NewReport, userId: string) {
+      return database.transaction(async (client) => {
+        await ensureReportUser(client, userId);
+        // Lock in stable order to avoid deadlocks when requests share photo ids.
+        if (input.photoIds.length) {
+          const photos = await client.query(`SELECT id FROM report_photos
+            WHERE id = ANY($1::uuid[]) AND owner_id = $2 AND report_id IS NULL
+            AND ready AND expires_at > now() ORDER BY id FOR UPDATE`, [input.photoIds, userId]);
+          if (photos.rows.length !== input.photoIds.length) {
+            throw new RequestError(422, "A photo is unavailable, expired, or belongs to another user. Upload it again.");
+          }
+        }
+        const sentence = input.description.split(/(?<=[.!?])\s|\n/)[0].trim();
+        const title = sentence.length <= 80 ? sentence : `${sentence.slice(0, 79).trimEnd()}…`;
+        const created = await client.query<{ id: number }>(`INSERT INTO reports
+          (author_id, title, description, category, severity, lat, lng, location)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`, [
+          userId, title, input.description, input.category, input.severity, input.lat, input.lng,
+          input.locationDetails || `${input.lat.toFixed(4)}, ${input.lng.toFixed(4)}`,
+        ]);
+        const id = created.rows[0].id;
+        for (const [position, photoId] of input.photoIds.entries()) {
+          await client.query("UPDATE report_photos SET report_id = $1, position = $2 WHERE id = $3", [id, position, photoId]);
+        }
+        // Feed posts are a projection of reports, so both become visible atomically.
+        const createdRow = await row(client, id, userId);
+        return { report: toReport(createdRow, userId), post: toPost(createdRow, userId) };
+      });
+    },
+    async toggleUpvote(id: number, userId: string) {
+      return database.transaction(async (client) => {
+        await ensureReportUser(client, userId);
+        await lockReport(client, id);
+        const removed = await client.query("DELETE FROM report_votes WHERE report_id = $1 AND user_id = $2 RETURNING user_id", [id, userId]);
+        if (!removed.rows.length) await client.query("INSERT INTO report_votes (report_id, user_id) VALUES ($1,$2)", [id, userId]);
+        return toReport(await row(client, id, userId), userId);
+      });
+    },
+    async addComment(id: number, userId: string, text: string) {
+      return database.transaction(async (client) => {
+        await ensureReportUser(client, userId);
+        await lockReport(client, id);
+        const count = await client.query<{ count: number }>("SELECT count(*)::integer AS count FROM report_comments WHERE report_id = $1", [id]);
+        if (count.rows[0].count >= 200) throw new RequestError(409, "This report has reached its comment limit.");
+        await client.query("INSERT INTO report_comments (id, report_id, author_id, text) VALUES ($1,$2,$3,$4)", [randomUUID(), id, userId, text]);
+        return toReport(await row(client, id, userId), userId);
+      });
+    },
+    async toggleReaction(id: number, userId: string) {
+      return database.transaction(async (client) => {
+        await ensureReportUser(client, userId);
+        await lockReport(client, id);
+        const removed = await client.query("DELETE FROM report_reactions WHERE report_id = $1 AND user_id = $2 RETURNING user_id", [id, userId]);
+        if (!removed.rows.length) await client.query("INSERT INTO report_reactions (report_id, user_id) VALUES ($1,$2)", [id, userId]);
+        return toPost(await row(client, id, userId), userId);
+      });
+    },
+    async getPhotoKey(id: string) {
+      const result = await database.query<{ object_key: string }>("SELECT object_key FROM report_photos WHERE id = $1 AND report_id IS NOT NULL AND ready", [id]);
+      return result.rows[0]?.object_key ?? null;
+    },
   };
 }
 
-/** All posts, newest first. */
-export function listPosts(viewerId: string | null): CityPost[] {
-  return [...getStore().posts.values()]
-    .map((stored) => toPost(stored, viewerId))
-    .sort((a, b) => b.postedAt.localeCompare(a.postedAt) || b.id - a.id);
-}
-
-/** Toggle the viewer's "Thanks" / "Going". Returns null if the post doesn't exist. */
-export function toggleReaction(postId: number, viewerId: string): CityPost | null {
-  const stored = getStore().posts.get(postId);
-  if (!stored) return null;
-  if (stored.reactorIds.has(viewerId)) stored.reactorIds.delete(viewerId);
-  else stored.reactorIds.add(viewerId);
-  return toPost(stored, viewerId);
-}
+export const { listReports, listPosts, createReport, toggleUpvote, addComment, toggleReaction, getPhotoKey } = reportingStore(db);

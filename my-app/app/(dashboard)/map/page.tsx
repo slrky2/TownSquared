@@ -103,7 +103,7 @@ export default function MapPage() {
         </div>
 
         <ul className="space-y-3 px-4 py-4 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
-          {!isLive ? (
+          {!isLive && !error ? (
             <li role="status" className="py-8 text-center text-sm text-zinc-500">
               Loading reports…
             </li>
@@ -129,8 +129,7 @@ export default function MapPage() {
                   report={report}
                   isSelected={selectedId === markerId}
                   onSelect={() => setSelectedId((cur) => (cur === markerId ? null : markerId))}
-                  // Failed upvotes roll back automatically; nothing else to show.
-                  onToggleUpvote={() => void toggleUpvote(report.id).catch(() => {})}
+                  onToggleUpvote={() => toggleUpvote(report.id)}
                   onAddComment={(text) => addComment(report.id, text)}
                 />
               </li>

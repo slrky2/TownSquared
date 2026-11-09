@@ -24,7 +24,7 @@ interface CommunityFeedProps {
   selectedId: string | null;
   showTimes: boolean;
   onSelect: (markerId: string) => void;
-  onToggleReaction: (postId: number) => void;
+  onToggleReaction: (postId: number) => Promise<void>;
 }
 
 /** Feed of updates from the city and neighbors, filterable by type. */

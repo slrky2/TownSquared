@@ -11,15 +11,18 @@ A Next.js community app for Lowell, MA. Application source is in `my-app/`.
    - **Required:** `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` and `CLERK_SECRET_KEY`, from the same Clerk instance.
    - **Maps:** `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY`; optionally `NEXT_PUBLIC_GOOGLE_MAPS_MAP_ID`.
    - **Chatbot:** `ANTHROPIC_API_KEY`. Without it, the assistant responds with an unavailable message (503).
+   - **Reports:** `DATABASE_URL` and `REPORTS_S3_*` for PostgreSQL and private object storage. Run migrations before deploying; see [reporting setup](my-app/docs/reporting-storage.md).
    - **City staff:** optionally `CITY_STAFF_EMAILS` (comma-separated verified emails).
 5. Deploy. For a public production release, configure a production instance in Clerk for your deployed domain and enable the desired sign-in methods. Use Clerk development keys for previews. Restrict your Google Maps browser key to the deployed domains and enable Maps JavaScript API and Geocoding API.
 6. Check `/`, `/sign-in`, `/map`, and `/chatbot`. Sign in and try posting a report and claiming a bounty. Redeploy after changing `NEXT_PUBLIC_*` values because they are embedded at build time.
 
-Vercel's Git integration handles preview and production deployments. GitHub Actions runs tests and a production build; it does not deploy to GitHub Pages. No Vercel token is needed in GitHub Actions.
+Vercel's Git integration handles preview and production deployments. GitHub Actions runs lint, type checking, tests, and a production build; it does not deploy to GitHub Pages. No Vercel token is needed in GitHub Actions.
 
-## Demo storage
+## Reporting storage
 
-Reports, photos, reactions, bounties, and demo wallets currently live in server memory. They can reset on cold starts or deployments and are not shared between function instances. This deployment is suitable for a demo; it does not provide durable data or real payments. No database setup is required, and setting `DATABASE_URL` alone would not add persistence.
+Reports, comments, votes, feed entries/reactions, and photo associations use PostgreSQL. Photos are uploaded directly to private S3-compatible storage and validated before publication. Reporting writes require Clerk sign-in. There is no in-memory fallback or automatic report seed.
+
+Follow [the reporting setup guide](my-app/docs/reporting-storage.md) for local Docker services, migrations, bucket configuration, cleanup, and production deployment. Bounties, profiles, job history, and simulated wallets also use PostgreSQL; see [bounty persistence](my-app/docs/bounties-storage.md). Bounty photos share the private object store. These balances do not provide real payments. Community messages remain session-only.
 
 ## Local development
 
@@ -27,11 +30,14 @@ Reports, photos, reactions, bounties, and demo wallets currently live in server 
 cd my-app
 npm ci
 cp .env.local.example .env.local
-# Fill in the Clerk keys and optional feature keys.
+# Fill in Clerk keys and reporting variables; see the reporting setup guide.
+docker compose up -d --wait
+npm run db:migrate
+npm run storage:setup:local
 npm run dev
 ```
 
-Use Node.js 22.x. Run `npm test` and `npm run build` before opening a pull request.
+Use Node.js 22.x. Run `npm test`, `npm run typecheck`, `npm run lint`, and `npm run build` before opening a pull request.
 The chatbot's `data/Lowell.md` is explicitly bundled with its Node.js function.
 
 See [the app guide](my-app/README.md) for the source layout.

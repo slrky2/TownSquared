@@ -1,126 +1,53 @@
 "use client";
 
-import { useSyncExternalStore } from "react";
+import { useAuth } from "@clerk/nextjs";
 import useSWR, { mutate as globalMutate } from "swr";
 import { api } from "@/lib/api/client";
-import { seedReports } from "@/lib/db/seed";
 import type { CreateReportInput } from "@/lib/validators/issue";
 import type { CityPost, CityReport } from "@/types";
 
-// Shown during SSR / before the first fetch so the UI never renders empty.
-const FALLBACK_REPORTS = seedReports();
-
-// ─── Anonymous viewer id ──────────────────────────────────────────────────────
-// Until real auth exists, each browser gets a random id in localStorage so
-// upvotes are one-per-browser and comments can be attributed.
-
-const VIEWER_ID_KEY = "cityland:viewerId";
-let cachedViewerId: string | null = null;
-
-/** RFC 4122 v4 UUID; works on plain-http LAN demos where randomUUID is unavailable. */
-function createUuid(): string {
-  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-
-function getViewerId(): string {
-  if (cachedViewerId) return cachedViewerId;
-  let id: string | null = null;
-  try {
-    id = localStorage.getItem(VIEWER_ID_KEY);
-  } catch {
-    // storage blocked (private mode etc.) — fall through to an in-memory id
-  }
-  if (!id) {
-    id = createUuid();
-    try {
-      localStorage.setItem(VIEWER_ID_KEY, id);
-    } catch {
-      // ignore; id still works for this session
-    }
-  }
-  cachedViewerId = id;
-  return id;
-}
-
-const noopSubscribe = () => () => {};
-
-/** Viewer id on the client, null during SSR/hydration. */
-export function useViewerId(): string | null {
-  return useSyncExternalStore(noopSubscribe, getViewerId, () => null);
-}
-
-// ─── Reports ──────────────────────────────────────────────────────────────────
-
-const fetchReports = (url: string) =>
+const fetchReports = ([url]: readonly [string, string]) =>
   api.get<{ reports: CityReport[] }>(url).then((res) => res.reports);
-
 const replaceReport = (reports: CityReport[], updated: CityReport) =>
-  reports.map((r) => (r.id === updated.id ? updated : r));
+  reports.map((r) => r.id === updated.id ? updated : r);
 
 export function useIssues() {
-  const viewerId = useViewerId();
-  const key = viewerId ? `/api/issues?viewerId=${encodeURIComponent(viewerId)}` : null;
+  const { userId, isLoaded } = useAuth();
+  // The cache is partitioned by account; identity itself is read only from the session on the server.
+  const key = isLoaded ? ["/api/issues", userId ?? "public"] as const : null;
+  const { data, error, mutate } = useSWR(key, fetchReports, { refreshInterval: 15_000 });
+  const reports = data ?? [];
 
-  const { data, error, mutate } = useSWR(key, fetchReports, {
-    refreshInterval: 15_000, // pick up other residents' votes/comments during a demo
-  });
-  const reports = data ?? FALLBACK_REPORTS;
+  function requireSignIn() {
+    if (!userId) throw new Error("Sign in to report, comment, or vote.");
+  }
 
-  /** Optimistically toggle the viewer's upvote; rolls back if the request fails. */
   async function toggleUpvote(issueId: number) {
-    if (!viewerId) return;
-    await mutate(
-      async (current) => {
-        const { report } = await api.post<{ report: CityReport }>(
-          `/api/issues/${issueId}/upvote`,
-          { viewerId },
-        );
-        return replaceReport(current ?? FALLBACK_REPORTS, report);
-      },
-      {
-        optimisticData: (current) =>
-          (current ?? FALLBACK_REPORTS).map((r) =>
-            r.id === issueId
-              ? { ...r, hasUpvoted: !r.hasUpvoted, upvotes: r.upvotes + (r.hasUpvoted ? -1 : 1) }
-              : r,
-          ),
-        rollbackOnError: true,
-        revalidate: false,
-      },
-    );
+    requireSignIn();
+    await mutate(async (current) => {
+      const { report } = await api.post<{ report: CityReport }>(`/api/issues/${issueId}/upvote`, {});
+      return replaceReport(current ?? [], report);
+    }, {
+      optimisticData: (current) => (current ?? []).map((r) => r.id === issueId
+        ? { ...r, hasUpvoted: !r.hasUpvoted, upvotes: r.upvotes + (r.hasUpvoted ? -1 : 1) } : r),
+      rollbackOnError: true, revalidate: false,
+    });
   }
 
-  /** Post a comment. Throws with the server's message on failure. */
   async function addComment(issueId: number, text: string) {
-    if (!viewerId) throw new Error("Still loading, try again in a moment.");
-    const { report } = await api.post<{ report: CityReport }>(
-      `/api/issues/${issueId}/comments`,
-      { viewerId, text },
-    );
-    await mutate((current) => replaceReport(current ?? FALLBACK_REPORTS, report), {
-      revalidate: false,
-    });
+    requireSignIn();
+    const { report } = await api.post<{ report: CityReport }>(`/api/issues/${issueId}/comments`, { text });
+    await mutate((current) => replaceReport(current ?? [], report), { revalidate: false });
   }
 
-  /** File a new report. Throws with the server's message on failure. */
   async function createReport(input: CreateReportInput): Promise<CityReport> {
-    if (!viewerId) throw new Error("Still loading, try again in a moment.");
-    const { report, post } = await api.post<{ report: CityReport; post: CityPost }>("/api/issues", {
-      ...input,
-      viewerId,
-    });
-    // Put the new report on top. Every page using this hook updates.
-    await mutate((current) => [report, ...(current ?? FALLBACK_REPORTS)], { revalidate: false });
-    // Same for its feed post (cached by usePosts under /api/posts?...).
+    requireSignIn();
+    const { report, post } = await api.post<{ report: CityReport; post: CityPost }>("/api/issues", input);
+    await mutate((current) => [report, ...(current ?? []).filter((r) => r.id !== report.id)], { revalidate: false });
     await globalMutate<CityPost[]>(
-      (key) => typeof key === "string" && key.startsWith("/api/posts"),
-      (current) => (current ? [post, ...current] : current),
-      { revalidate: true },
+      (key) => Array.isArray(key) && key[0] === "/api/posts" && key[1] === userId,
+      (current) => current ? [post, ...current.filter((p) => p.id !== post.id)] : current,
+      { revalidate: false },
     );
     return report;
   }

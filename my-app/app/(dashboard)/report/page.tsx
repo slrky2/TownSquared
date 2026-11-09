@@ -1,13 +1,14 @@
 "use client";
 
 import Link from "next/link";
+import { SignInButton, useAuth } from "@clerk/nextjs";
 import { useEffect, useRef, useState } from "react";
 import LocationPicker from "@/components/map/LocationPicker";
 import { APP_CONFIG } from "@/config/app";
 import { useIssues } from "@/lib/hooks/useIssues";
 import { coordsOf, useUserLocation } from "@/lib/hooks/useUserLocation";
 import type { LatLng } from "@/lib/maps";
-import { photoToJpegDataUrl } from "@/lib/utils/image";
+import { uploadReportPhoto } from "@/lib/reports/upload";
 import { REPORT_CATEGORIES, REPORT_LIMITS, type ReportCategory } from "@/lib/utils/report";
 import { SEVERITY_LEVELS } from "@/lib/utils/severity";
 import type { TicketSeverity } from "@/types";
@@ -32,6 +33,8 @@ interface Photo {
  * Report a problem: photos, a description, and a pin on the map.
  */
 export default function ReportPage() {
+  const { userId, isLoaded } = useAuth();
+  const uploaded = useRef(new Map<string, { photoId: string; at: number }>());
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [description, setDescription] = useState("");
   const [pin, setPin] = useState<LatLng | null>(null);
@@ -117,6 +120,7 @@ export default function ReportPage() {
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (submitting) return;
+    if (!userId) { setSubmitError("Sign in to submit a report."); return; }
     const next: typeof errors = {};
     if (description.trim().length < MIN_DESCRIPTION) {
       next.description = `Please describe the issue in at least ${MIN_DESCRIPTION} characters.`;
@@ -128,11 +132,16 @@ export default function ReportPage() {
     setSubmitting(true);
     setSubmitError(null);
     try {
-      let encoded: string[];
-      try {
-        encoded = await Promise.all(photos.map((p) => photoToJpegDataUrl(p.file)));
-      } catch {
-        throw new Error("One of your photos couldn't be read. Try removing it or using a JPEG or PNG.");
+      const photoIds: string[] = [];
+      // Reuse completed uploads on retries; expire them before the server's one-hour deadline.
+      for (const photo of photos) {
+        const key = `${userId}:${photo.id}`;
+        let cached = uploaded.current.get(key);
+        if (!cached || Date.now() - cached.at > 50 * 60_000) {
+          cached = { photoId: await uploadReportPhoto(photo.file), at: Date.now() };
+          uploaded.current.set(key, cached);
+        }
+        photoIds.push(cached.photoId);
       }
       await createReport({
         description: description.trim(),
@@ -141,7 +150,7 @@ export default function ReportPage() {
         lat: pin.lat,
         lng: pin.lng,
         locationDetails: locationDetails.trim() || undefined,
-        photos: encoded,
+        photoIds,
       });
       setSubmitted(true);
     } catch (err) {
@@ -154,6 +163,7 @@ export default function ReportPage() {
   function reset() {
     photos.forEach((p) => URL.revokeObjectURL(p.previewUrl));
     setPhotos([]);
+    uploaded.current.clear();
     setDescription("");
     setPin(null);
     setLocationDetails("");
@@ -400,6 +410,12 @@ export default function ReportPage() {
           </label>
         </section>
 
+        {!userId && isLoaded && (
+          <p className="text-sm text-zinc-600 dark:text-zinc-300">
+            <SignInButton mode="modal"><button type="button" className="font-semibold text-emerald-700 underline">Sign in</button></SignInButton>
+            {" to submit your report. Your draft stays here while you sign in."}
+          </p>
+        )}
         {submitError && (
           <p role="alert" className="text-center text-sm text-red-600">
             {submitError}
@@ -408,7 +424,7 @@ export default function ReportPage() {
 
         <button
           type="submit"
-          disabled={submitting}
+          disabled={submitting || !userId || !isLoaded}
           className="rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 px-6 py-3 text-sm font-bold text-white shadow-md transition-transform hover:scale-[1.01] active:scale-95 disabled:cursor-wait disabled:opacity-70 disabled:hover:scale-100"
         >
           {submitting ? "Submitting…" : "Submit report"}
