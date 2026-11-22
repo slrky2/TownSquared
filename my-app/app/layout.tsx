@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "City Land",
+  title: "TownSquared",
   description: "Explore your city, report issues, and claim bounties.",
 };
 
